@@ -139,7 +139,7 @@ def adfs_attempts(users, passes):
         for username in users:
             combinations.append((username, password))
         
-    results = ThreadPool(threads).map(adfs_brute, combinations)
+    results = ThreadPool(threads).map(adfs_brute, combinations, chunksize=threads)
     for result in results:
         pass
 
@@ -172,7 +172,7 @@ def adfs_brute(args):
             status = 'Invalid'
             if verbose:
                 output(status, username, password, target, output_file_name)
-                LOGGER.debug("[-]Creds failed for: %s" % username)
+                LOGGER.debug("[-]Creds failed for: %s :: %s" % (username, password))
 
     except TimeoutError:
         LOGGER.critical("[!] Exceprion")
@@ -249,5 +249,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
