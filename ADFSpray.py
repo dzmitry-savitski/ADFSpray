@@ -27,6 +27,7 @@ threads = 1
 target = None
 output_file_name = None
 verbose = None
+chunk_size = 1000
 
 def logo():
     """
@@ -129,7 +130,7 @@ def output(status, username, password, target, output_file_name):
 
 
 def adfs_attempts(users, passes):
-    global threads, output_file_name, verbose
+    global threads, output_file_name, verbose, chunk_size
 
 
     LOGGER.info("[*] Started running at: %s" % datetime.datetime.now().strftime('%d-%m-%Y %H:%M:%S'))
@@ -139,7 +140,7 @@ def adfs_attempts(users, passes):
         for username in users:
             combinations.append((username, password))
         
-    results = ThreadPool(threads).map(adfs_brute, combinations, chunksize=threads)
+    results = ThreadPool(threads).map(adfs_brute, combinations, chunksize=chunk_size)
     for result in results:
         pass
 
